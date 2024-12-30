@@ -18,6 +18,9 @@ sources            = ['donut.c',
                       'format.c', 
                       'loader/clib.c', 
                       'donutmodule.c']
+define_macros      = [('BYPASS_AMSI_A', None),
+                      ('BYPASS_WLDP_B', None),
+                      ('BYPASS_ETW_B', None)]
 
 if sys.platform == 'win32':
     libraries.extend(static_libraries)
@@ -40,6 +43,7 @@ module = Extension(
         extra_compile_args = extra_compile_args,
         extra_link_args    = extra_link_args,
         extra_objects      = extra_objects,
+        define_macros      = define_macros,
 )
 
 setup(
