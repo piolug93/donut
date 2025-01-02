@@ -979,6 +979,7 @@ static int build_instance(PDONUT_CONFIG c) {
 
       DPRINT("Copying strings required to bypass ETW");
       strcpy(inst->ntdll, "ntdll");
+      strcpy(inst->ntTraceEvent, "NtTraceEvent");
       strcpy(inst->etwEventWrite, "EtwEventWrite");
       strcpy(inst->etwEventUnregister, "EtwEventUnregister");
       strcpy(inst->etwRet64, "\xc3");

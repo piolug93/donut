@@ -367,8 +367,9 @@ typedef struct _DONUT_INSTANCE {
     char        amsiInit[16];                 // AmsiInitialize
     char        amsiScanBuf[16];              // AmsiScanBuffer
     char        amsiScanStr[16];              // AmsiScanString
-    char        amsiOpenSess[16];             // AmsiOpenSess
+    char        amsiOpenSess[20];             // AmsiOpenSession
     char        etwEventWrite[16];            // EtwEventWrite
+    char        ntTraceEvent[16];             // NtTraceEvent
     char        etwEventUnregister[20];       // EtwEventUnregister
     char        etwRet64[1];                  // "ret" instruction for Etw
     char        etwRet32[4];                  // "ret 14h" instruction for Etw
