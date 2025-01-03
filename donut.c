@@ -69,6 +69,7 @@ static API_IMPORT api_imports[] = {
   {KERNEL32_DLL, "HeapFree"},
   {KERNEL32_DLL, "GetLastError"},
   {KERNEL32_DLL, "CloseHandle"},
+  {KERNEL32_DLL, "GetSystemInfo"},
         
   {SHELL32_DLL,  "CommandLineToArgvW"},
   
@@ -113,6 +114,8 @@ static API_IMPORT api_imports[] = {
   {NTDLL_DLL,    "NtCreateSection"},
   {NTDLL_DLL,    "NtMapViewOfSection"},
   {NTDLL_DLL,    "NtUnmapViewOfSection"},
+  {KERNEL32_DLL, "ReadProcessMemory"},  
+  {KERNEL32_DLL, "WideCharToMultiByte"},
   //{KERNEL32_DLL, "AddVectoredExceptionHandler"},
   //{KERNEL32_DLL, "RemoveVectoredExceptionHandler"},
   //{NTDLL_DLL,    "RtlFreeUnicodeString"},

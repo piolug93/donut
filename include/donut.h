@@ -253,8 +253,8 @@ typedef struct _DONUT_INSTANCE {
     uint64_t    iv;                           // the 64-bit initial value for maru hash
 
     union {
-      uint64_t  hash[64];                     // holds up to 64 api hashes
-      void     *addr[64];                     // holds up to 64 api addresses
+      uint64_t  hash[67];                     // holds up to 64 api hashes
+      void     *addr[67];                     // holds up to 64 api addresses
       // include prototypes only if header included from loader.h
       #ifdef LOADER_H
       struct {
@@ -284,6 +284,7 @@ typedef struct _DONUT_INSTANCE {
         HeapFree_t                       HeapFree;
         GetLastError_t                   GetLastError;
         CloseHandle_t                    CloseHandle;
+        GetSystemInfo_t                  GetSystemInfo;
         
         // imports from shell32.dll
         CommandLineToArgvW_t             CommandLineToArgvW;
@@ -334,6 +335,8 @@ typedef struct _DONUT_INSTANCE {
         NtCreateSection_t                NtCreateSection;
         NtMapViewOfSection_t             NtMapViewOfSection;
         NtUnmapViewOfSection_t           NtUnmapViewOfSection;
+        ReadProcessMemory_t              ReadProcessMemory;
+        WideCharToMultiByte_t            WideCharToMultiByte;
        // AddVectoredExceptionHandler_t    AddVectoredExceptionHandler;
        // RemoveVectoredExceptionHandler_t RemoveVectoredExceptionHandler;
        // RtlFreeUnicodeString_t         RtlFreeUnicodeString;
