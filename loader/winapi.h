@@ -76,6 +76,12 @@
           LPCCH                              lpDefaultChar,
           LPBOOL                             lpUsedDefaultChar);
 
+    typedef BOOL (WINAPI *FlushInstructionCache_t)(
+      HANDLE hProcess,
+      LPCVOID lpBaseAddress,
+      SIZE_T dwSize
+    );
+
     typedef LPWSTR* (WINAPI *CommandLineToArgvW_t)(LPCWSTR lpCmdLine, int* pNumArgs);
 
     typedef BOOL (WINAPI *CloseHandle_t)(HANDLE hObject);

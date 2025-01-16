@@ -116,6 +116,7 @@ static API_IMPORT api_imports[] = {
   {NTDLL_DLL,    "NtUnmapViewOfSection"},
   {KERNEL32_DLL, "ReadProcessMemory"},  
   {KERNEL32_DLL, "WideCharToMultiByte"},
+  {KERNEL32_DLL, "FlushInstructionCache"},
   //{KERNEL32_DLL, "AddVectoredExceptionHandler"},
   //{KERNEL32_DLL, "RemoveVectoredExceptionHandler"},
   //{NTDLL_DLL,    "RtlFreeUnicodeString"},
